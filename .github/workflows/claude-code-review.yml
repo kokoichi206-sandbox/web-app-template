@@ -1,0 +1,80 @@
+# ==========================================================
+# CAUTION:
+# (2025/12/30 現在) Anthropic 社の利用規約に以下の記載があり、
+# GitHub Actions ワークフローでの複数人の利用が抵触する可能性がある。
+#
+# > You may not share your Account login information, Anthropic API key, or Account credentials with anyone else.
+# > You also may not make your Account available to anyone else.
+#
+# ref: https://www.anthropic.com/legal/consumer-terms
+#
+# そのため現在では @kokoichi206 の個人での利用 + α に留め、積極的な利用を推奨していない。
+# ==========================================================
+
+name: claude-code-review
+
+on:
+  # どのファイルともマッチさせないために dummy の trigger を指定。
+  pull_request:
+    types: [opened, synchronize]
+    # Optional: Only run on specific file changes
+    # paths:
+    #   - "src/**/*.ts"
+    #   - "src/**/*.tsx"
+    #   - "src/**/*.js"
+    #   - "src/**/*.jsx"
+    paths:
+      - "not-found/**/*"
+
+jobs:
+  claude-review:
+    # Optional: Filter by PR author
+    # if: |
+    #   github.event.pull_request.user.login == 'external-contributor' ||
+    #   github.event.pull_request.user.login == 'new-developer' ||
+    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--max-old-space-size=4096"
+    permissions:
+      contents: read
+      pull-requests: write # レビューコメントを書き込むために必要
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 差分比較のために全履歴を取得
+
+      # package.json の packageManager フィールドから自動的にバージョンを読み込む
+      # https://github.com/pnpm/action-setup#version
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
+
+      # package.json の devEngines.runtime.version から Node.js バージョンを読み込む
+      - name: Get Node.js version
+        id: node-version
+        run: echo "version=$(jq -r '.devEngines.runtime.version' package.json)" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          prompt: "/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options

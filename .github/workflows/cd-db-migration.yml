@@ -1,0 +1,73 @@
+# ============================================================================
+# DB マイグレーションワークフロー (Prisma)
+#
+# 使用するには:
+# 1. GitHub Secrets に以下を設定:
+#    - DATABASE_URL (各環境ごと)
+#    - SLACK_WEBHOOK_URL (任意)
+# 2. GitHub Environments で production / development を作成
+# 3. 下記の on: セクションのコメントを外す
+# ============================================================================
+name: cd-db-migration
+
+# TODO: DB をセットアップ後、以下のコメントを外して有効化
+# on:
+#   push:
+#     branches:
+#       - main
+#       - develop
+#     paths:
+#       - "prisma/**"
+#       - "pnpm-lock.yaml"
+#       - "package.json"
+#       - ".github/workflows/cd-db-migration.yml"
+#   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Run Prisma Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
+
+      - name: Get Node.js version
+        id: node-version
+        run: echo "version=$(jq -r '.devEngines.runtime.version' package.json)" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Prisma migrate
+        run: npx prisma migrate deploy
+
+  slack-notification:
+    name: Slack Notification
+    needs:
+      - migrate
+    if: always()
+    uses: ./.github/workflows/slack-notification.yml
+    with:
+      status: ${{ needs.migrate.result == 'success' && 'success' || 'failure' }}
+      workflow_name: "[DB Migration] ${{ github.ref_name == 'main' && 'production' || 'development' }}"
+      run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

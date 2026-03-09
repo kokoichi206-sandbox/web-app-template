@@ -1,0 +1,163 @@
+# ==========================================================
+# PR がマージされた際に、レビュー指摘を学習して仕組み化するワークフロー
+#
+# ## Requirements
+#
+# 1. Claude Code の Pro/Max サブスクリプション
+#    - https://claude.ai/settings/claude-code
+#    - OAuth token を取得する必要あり
+#
+# 2. GitHub Secrets の設定
+#    - CLAUDE_CODE_OAUTH_TOKEN: Claude Code の OAuth token
+#    - Settings > Secrets and variables > Actions で設定
+#
+# ## 処理フロー
+#
+# 1. PR close (merged) をトリガー
+# 2. レビューコメントを全て取得
+# 3. Claude Code に投げて分析・改善提案を生成
+# 4. 改善を実装した PR を作成
+#
+# ## 改善の種類
+#
+# - CLAUDE.md への追記 (一般的なガイドライン)
+# - Skills の新規作成/更新 (ワークフロー/プロセス)
+# - Custom ESLint rules の作成 (自動検出可能なコード品質ルール)
+#
+# ## 手動実行
+#
+# Actions タブ > learn-from-review > Run workflow > PR番号を入力
+# ==========================================================
+
+name: learn-from-review
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - develop
+      - main
+
+  # 手動実行用
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "分析対象の PR 番号"
+        required: true
+        type: number
+
+jobs:
+  learn-from-review:
+    # PR close イベントの場合: マージされた場合のみ実行（ただし learn-from-review/ ブランチは除外）
+    # workflow_dispatch の場合: 常に実行
+    # Note: learn-from-review/ ブランチからのマージでは実行しない（無限ループ防止）
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       !startsWith(github.event.pull_request.head.ref, 'learn-from-review/'))
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--max-old-space-size=4096"
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 全履歴取得
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
+
+      - name: Get Node.js version
+        id: node-version
+        run: echo "version=$(jq -r '.devEngines.runtime.version' package.json)" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Collect review comments
+        id: collect-comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # workflow_dispatch の場合は inputs から、PR close の場合は event から取得
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER=${{ inputs.pr_number }}
+          else
+            PR_NUMBER=${{ github.event.pull_request.number }}
+          fi
+          REPO=${{ github.repository }}
+
+          echo "Collecting review comments for PR #${PR_NUMBER}..."
+
+          # レビューコメント (コード行へのコメント)
+          REVIEW_COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate)
+
+          # レビュー本体 (Approve/Request changes のコメント)
+          REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate)
+
+          # Issue コメント (PR 全体へのコメント)
+          ISSUE_COMMENTS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate)
+
+          # PR 自体の情報
+          PR_INFO=$(gh pr view ${PR_NUMBER} --json title,body,author,files)
+
+          # JSON ファイルに保存
+          mkdir -p /tmp/review-data
+          echo "${REVIEW_COMMENTS}" > /tmp/review-data/review_comments.json
+          echo "${REVIEWS}" > /tmp/review-data/reviews.json
+          echo "${ISSUE_COMMENTS}" > /tmp/review-data/issue_comments.json
+          echo "${PR_INFO}" > /tmp/review-data/pr_info.json
+
+          # コメント数をカウント
+          REVIEW_COUNT=$(echo "${REVIEW_COMMENTS}" | jq 'length')
+          REVIEWS_COUNT=$(echo "${REVIEWS}" | jq 'length')
+          ISSUE_COUNT=$(echo "${ISSUE_COMMENTS}" | jq 'length')
+
+          echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+          echo "review_count=${REVIEW_COUNT}" >> $GITHUB_OUTPUT
+          echo "reviews_count=${REVIEWS_COUNT}" >> $GITHUB_OUTPUT
+          echo "issue_count=${ISSUE_COUNT}" >> $GITHUB_OUTPUT
+
+          echo "Found: ${REVIEW_COUNT} review comments, ${REVIEWS_COUNT} reviews, ${ISSUE_COUNT} issue comments"
+
+      - name: Check if there are actionable comments
+        id: check-comments
+        run: |
+          TOTAL=$(( ${{ steps.collect-comments.outputs.review_count }} + ${{ steps.collect-comments.outputs.reviews_count }} + ${{ steps.collect-comments.outputs.issue_count }} ))
+          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
+          if [ "${TOTAL}" -eq 0 ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "No review comments found. Skipping analysis."
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Claude Code to analyze and improve
+        if: steps.check-comments.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
+          claude_args: "--settings .claude/settings.json"
+          prompt: |
+            /learn-from-review ${{ steps.collect-comments.outputs.pr_number }}
+
+            ## Context
+            - PR #${{ steps.collect-comments.outputs.pr_number }}
+            - Review comments data: /tmp/review-data/
+
+            Please analyze the review comments and implement improvements to prevent similar issues in the future.

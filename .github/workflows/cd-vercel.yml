@@ -1,0 +1,94 @@
+# ============================================================================
+# Vercel デプロイワークフロー
+#
+# 使用するには:
+# 1. GitHub Secrets に以下を設定:
+#    - VERCEL_TOKEN
+#    - VERCEL_ORG_ID
+#    - VERCEL_PROJECT_ID
+#    - SLACK_WEBHOOK_URL (任意)
+# 2. GitHub Environments で production / development を作成
+# 3. 下記の on: セクションのコメントを外す
+# ============================================================================
+name: cd-vercel
+
+# TODO: Vercel プロジェクトをセットアップ後、以下のコメントを外して有効化
+# on:
+#   push:
+#     branches:
+#       - main
+#       - develop
+#   workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  # 前のデプロイが完了するまで待機してから次を実行する。
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NODE_OPTIONS: "--max-old-space-size=4096"
+    # GitHub Environment を branch で切り替え:
+    #
+    # main → production
+    # develop → development
+    environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # package.json の packageManager フィールドから自動的にバージョンを読み込む
+      # https://github.com/pnpm/action-setup#version
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
+
+      # package.json の devEngines.runtime.version から Node.js バージョンを読み込む
+      - name: Get Node.js version
+        id: node-version
+        run: echo "version=$(jq -r '.devEngines.runtime.version' package.json)" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Vercel CLI
+        run: pnpm add -g vercel
+
+      - name: Link Vercel Project
+        run: vercel link --yes --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # main → production, develop → dev 環境にデプロイ
+      - name: Deploy to Vercel
+        run: |
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
+          else
+            vercel deploy --target=dev --yes --token=${{ secrets.VERCEL_TOKEN }}
+          fi
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+  slack-notification:
+    name: Slack Notification
+    needs:
+      - deploy
+    if: always()
+    uses: ./.github/workflows/slack-notification.yml
+    with:
+      status: ${{ needs.deploy.result }}
+      workflow_name: "${{ github.workflow }} (${{ github.ref_name }})"
+      run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

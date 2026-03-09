@@ -1,0 +1,52 @@
+name: slack-notification
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        required: true
+        type: string
+        description: "success or failure"
+      workflow_name:
+        required: true
+        type: string
+        description: "Name of the workflow"
+      run_url:
+        required: true
+        type: string
+        description: "URL to the workflow run"
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Determine notification style
+        id: style
+        run: |
+          if [ "${{ inputs.status }}" == "success" ]; then
+            echo "color=good" >> $GITHUB_OUTPUT
+            echo "icon=:white_check_mark:" >> $GITHUB_OUTPUT
+            echo "title=${{ inputs.workflow_name }} - Success" >> $GITHUB_OUTPUT
+          else
+            echo "color=danger" >> $GITHUB_OUTPUT
+            echo "icon=:x:" >> $GITHUB_OUTPUT
+            echo "title=${{ inputs.workflow_name }} - Failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack notification
+        uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
+        env:
+          SLACK_USERNAME: "GitHub Actions"
+          SLACK_TITLE: ${{ steps.style.outputs.title }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_ICON_EMOJI: ${{ steps.style.outputs.icon }}
+          SLACK_COLOR: ${{ steps.style.outputs.color }}
+          SLACK_MESSAGE: |
+            Workflow: ${{ inputs.workflow_name }}
+            Status: ${{ inputs.status }}
+            Link: ${{ inputs.run_url }}
+          SLACK_FOOTER: "GitHub Actions"

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "src/app/**/*.{ts,tsx}",
+    "src/shared/**/*.{ts,tsx}",
+    "src/server/**/*.{ts,tsx}",
+    "next.config.ts",
+    "postcss.config.mjs",
+  ],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignore": [
+    "**/*.test.{ts,tsx}",
+    "**/__mocks__/**",
+    "**/__test-fixtures__/**",
+    "node_modules/**",
+    ".next/**",
+    "prisma/migrations/**",
+    "src/test/**",
+  ],
+  "ignoreDependencies": [
+    "tailwindcss",
+    "pino-pretty",
+    "@prisma/client",
+    "@vitest/coverage-v8",
+    "dayjs",
+    "@testing-library/user-event",
+    "postcss",
+  ],
+}
